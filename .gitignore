@@ -1,0 +1,17 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+
+# Logs
+*.log
+
+# Dependencies
+vendor/
+
+# OS files
+.DS_Store
+Thumbs.db
