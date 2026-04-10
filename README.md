@@ -4,10 +4,10 @@
 ![Go Version](https://img.shields.io/github/go-mod/go-version/YudaKusumaID/multi-isp-proxy)
 ![GitHub release (latest by date)](https://img.shields.io/github/v/release/YudaKusumaID/multi-isp-proxy)
 ![License](https://img.shields.io/github/license/YudaKusumaID/multi-isp-proxy)
-![Platform](https://img.shields.io/badge/platform-Windows-blue)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-blue)
 ![Contributions Welcome](https://img.shields.io/badge/contributions-welcome-brightgreen)
 
-**Venn Combine Connection** is a lightweight, interactive CLI tool for Windows that empowers you to aggregate multiple internet connections into a single, high-performance proxy — effectively enabling **internet bonding** and **link aggregation** at the application level.
+**Venn Combine Connection** is a lightweight, interactive CLI tool for Windows and Linux that empowers you to aggregate multiple internet connections into a single, high-performance proxy — effectively enabling **internet bonding** and **link aggregation** at the application level.
 
 Acting as both an **HTTP CONNECT** and **SOCKS5 proxy**, Venn intelligently distributes network traffic across all your active interfaces (Wi-Fi, Ethernet, Tethering, Cellular) to maximize bandwidth and ensure network redundancy. Think of it as a **multi-WAN load balancer** that runs entirely from your terminal.
 
@@ -23,9 +23,9 @@ Acting as both an **HTTP CONNECT** and **SOCKS5 proxy**, Venn intelligently dist
   - **Round-Robin**: Distributes connections evenly across all selected interfaces. Ideal for load balancing and heavy browsing.
   - **Failover**: Assigns a primary interface and automatically routes traffic to secondary ones if the primary goes offline.
 - **Interactive TUI (Terminal User Interface)**: A beautiful, responsive terminal dashboard built with Bubbletea for real-time monitoring and easy interface selection.
-- **Deep Windows Integration**:
-  - **Auto-Config**: Automatically injects proxy settings into the Windows system.
-  - **Magic Restore**: Safely backs up and restores your original Windows proxy settings upon exit.
+- **System Proxy Integration**:
+  - **Auto-Config (Windows)**: Automatically injects proxy settings into the Windows system. (For Linux, manual configuration in browser/app is required).
+  - **Magic Restore (Windows)**: Safely backs up and restores your original Windows proxy settings upon exit.
 - **Dual Protocol Support**: 
   - `HTTP CONNECT` Proxy (Default: port 1080) - Universal compatibility.
   - `SOCKS5` Proxy (Default: port 1081) - For raw TCP/UDP packet routing.
@@ -49,29 +49,31 @@ Venn sits between your applications and the internet as a local proxy server. Wh
 1. **Round-Robin** cycles through all active interfaces, distributing load evenly.
 2. **Failover** sends all traffic through your primary adapter and only switches when it detects the primary is down.
 
-All proxy settings are automatically configured in Windows, so every app that respects system proxy settings will benefit — no per-app configuration needed.
+On Windows, proxy settings are automatically configured, so every app that respects system proxy settings will benefit. On Linux, simply configure your specific applications (e.g. Firefox, Curl) to point to the proxy address.
 
 ## 🛠 Installation
 
 ### Prerequisites
-- Windows OS (Windows 10/11 recommended)
+- Windows OS (Windows 10/11) or Linux
 - [Go](https://go.dev/dl/) 1.25 or later (Only if building from source)
 
-### Quick Start (Binary)
+### Quick Start (Windows)
 1. Download the latest `venn.exe` from the [Releases](https://github.com/YudaKusumaID/multi-isp-proxy/releases) page.
 2. Run the executable in your terminal (PowerShell or CMD).
 
 ### Build From Source
-```powershell
+```sh
 # Clone the repository
 git clone https://github.com/YudaKusumaID/multi-isp-proxy.git
 cd multi-isp-proxy
 
 # Build the binary
-go build -o venn.exe ./cmd/
+go build -o venn.exe ./cmd/  # On Windows
+go build -o venn ./cmd/      # On Linux
 
 # Run the tool
-.\venn.exe
+.\venn.exe  # On Windows
+./venn      # On Linux
 ```
 
 ## 📖 Usage Guide
@@ -79,7 +81,7 @@ go build -o venn.exe ./cmd/
 1. **Launch**: Start `venn.exe`. *(Tip: Run with `-addr :8080` to assign a custom port).*
 2. **Select Interfaces**: Use `↑/↓` arrow keys to navigate and `Space` to toggle the network adapters you want to combine. Press `a` to select all, then `Enter` to confirm.
 3. **Choose Strategy**: Select between `Round-Robin` or `Failover` mode.
-4. **System Auto-Proxy**: When prompted, press `Y` to automatically configure Windows to route traffic through Venn. Your original settings will be magically restored when you quit.
+4. **System Auto-Proxy (Windows)**: When prompted, press `Y` to automatically configure Windows to route traffic through Venn. Your original settings will be magically restored when you quit. (Linux users can skip this and manually configure `127.0.0.1:1080` in their browsers).
 5. **Dashboard Controls**: Monitor traffic in real-time. Press `r` to reset statistics or `q` to safely exit the application.
 
 ## ❓ FAQ & Troubleshooting

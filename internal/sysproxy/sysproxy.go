@@ -1,4 +1,6 @@
-package winproxy
+//go:build windows
+
+package sysproxy
 
 import (
 	"fmt"
@@ -11,14 +13,7 @@ const (
 	internetSettingsKey = `Software\Microsoft\Windows\CurrentVersion\Internet Settings`
 )
 
-// ProxySettings holds the Windows proxy configuration for backup/restore.
-type ProxySettings struct {
-	ProxyEnable   uint32
-	ProxyServer   string
-	ProxyOverride string
-	hasServer     bool
-	hasOverride   bool
-}
+
 
 // Backup reads the current Windows proxy settings from the registry.
 func Backup() (*ProxySettings, error) {

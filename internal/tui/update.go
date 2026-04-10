@@ -9,7 +9,7 @@ import (
 	"github.com/ayanacorp/venn-combine-connection/internal/balancer"
 	"github.com/ayanacorp/venn-combine-connection/internal/netif"
 	"github.com/ayanacorp/venn-combine-connection/internal/proxy"
-	"github.com/ayanacorp/venn-combine-connection/internal/winproxy"
+	"github.com/ayanacorp/venn-combine-connection/internal/sysproxy"
 )
 
 // Update handles all messages and user input.
@@ -194,14 +194,14 @@ func (m Model) startProxy() (tea.Model, tea.Cmd) {
 
 	// Setup Windows proxy if requested
 	if m.winProxyAuto {
-		backup, err := winproxy.Backup()
+		backup, err := sysproxy.Backup()
 		if err != nil {
 			m.err = err
 			return m, nil
 		}
 		m.proxyBackup = backup
 
-		if err := winproxy.Enable(m.proxyAddr); err != nil {
+		if err := sysproxy.Enable(m.proxyAddr); err != nil {
 			m.err = err
 			return m, nil
 		}
@@ -236,7 +236,7 @@ func (m Model) shutdown() (tea.Model, tea.Cmd) {
 
 	// Restore Windows proxy settings
 	if m.winProxyAuto && m.proxyBackup != nil {
-		winproxy.Restore(m.proxyBackup)
+		sysproxy.Restore(m.proxyBackup)
 	}
 
 	return m, tea.Quit

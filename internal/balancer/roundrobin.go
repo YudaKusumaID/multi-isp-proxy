@@ -42,9 +42,8 @@ func (r *RoundRobin) Next() *netif.NetInterface {
 		}
 	}
 
-	// All interfaces are down — return first one anyway as a fallback
-	r.index = 1 % n
-	return r.interfaces[0]
+	// All interfaces are down — return nil so proxy correctly fails
+	return nil
 }
 
 // SetInterfaces updates the list of available interfaces.

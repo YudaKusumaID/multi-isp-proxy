@@ -8,7 +8,7 @@ import (
 	"github.com/ayanacorp/venn-combine-connection/internal/balancer"
 	"github.com/ayanacorp/venn-combine-connection/internal/netif"
 	"github.com/ayanacorp/venn-combine-connection/internal/proxy"
-	"github.com/ayanacorp/venn-combine-connection/internal/winproxy"
+	"github.com/ayanacorp/venn-combine-connection/internal/sysproxy"
 )
 
 // Phase represents the current phase of the TUI.
@@ -38,7 +38,7 @@ type Model struct {
 	// Running phase
 	bal         balancer.Strategy
 	proxyServer *proxy.Server
-	proxyBackup *winproxy.ProxySettings
+	proxyBackup *sysproxy.ProxySettings
 
 	// Stats
 	statsTimer time.Time
