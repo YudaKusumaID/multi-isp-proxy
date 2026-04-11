@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -205,15 +206,25 @@ func (m Model) viewSelectMode() string {
 func (m Model) viewConfirmWinProxy() string {
 	var b strings.Builder
 
-	b.WriteString(titleStyle.Render("Windows Proxy Setup"))
-	b.WriteString("\n\n")
-
-	b.WriteString("Auto-configure Windows to use this proxy?\n\n")
-	b.WriteString(subtitleStyle.Render("What this does:"))
-	b.WriteString("\n")
-	b.WriteString("  • Sets system SOCKS proxy to " + selectedStyle.Render(m.proxyAddr) + "\n")
-	b.WriteString("  • Bypasses localhost and local networks\n")
-	b.WriteString("  • " + selectedStyle.Render("Automatically restores") + " original settings on exit\n\n")
+	if runtime.GOOS == "linux" {
+		b.WriteString(titleStyle.Render("Linux Proxy Setup"))
+		b.WriteString("\n\n")
+		b.WriteString("Enable proxy server on this machine?\n\n")
+		b.WriteString(subtitleStyle.Render("What this does:"))
+		b.WriteString("\n")
+		b.WriteString("  • Starts HTTP/SOCKS5 proxy on " + selectedStyle.Render(m.proxyAddr) + "\n")
+		b.WriteString("  • Configure your browser to use the proxy address above\n")
+		b.WriteString("  • " + selectedStyle.Render("Proxy stops cleanly") + " on exit\n\n")
+	} else {
+		b.WriteString(titleStyle.Render("Windows Proxy Setup"))
+		b.WriteString("\n\n")
+		b.WriteString("Auto-configure Windows to use this proxy?\n\n")
+		b.WriteString(subtitleStyle.Render("What this does:"))
+		b.WriteString("\n")
+		b.WriteString("  • Sets system SOCKS proxy to " + selectedStyle.Render(m.proxyAddr) + "\n")
+		b.WriteString("  • Bypasses localhost and local networks\n")
+		b.WriteString("  • " + selectedStyle.Render("Automatically restores") + " original settings on exit\n\n")
+	}
 
 	if m.err != nil {
 		b.WriteString(errorStyle.Render("Error: "+m.err.Error()) + "\n\n")
@@ -247,7 +258,11 @@ func (m Model) viewRunning() string {
 	b.WriteString(selectedStyle.Render(m.mode.String()))
 	if m.winProxyAuto {
 		b.WriteString("  ")
-		b.WriteString(subtitleStyle.Render("WinProxy: "))
+		label := "WinProxy: "
+		if runtime.GOOS == "linux" {
+			label = "LinuxProxy: "
+		}
+		b.WriteString(subtitleStyle.Render(label))
 		b.WriteString(selectedStyle.Render("ON"))
 	}
 	b.WriteString("\n\n")
@@ -314,7 +329,11 @@ func (m Model) viewStopping() string {
 	b.WriteString("\n\n")
 
 	if m.winProxyAuto {
-		b.WriteString(selectedStyle.Render("✓") + " Windows proxy settings restored\n")
+		if runtime.GOOS == "linux" {
+			b.WriteString(selectedStyle.Render("✓") + " Proxy settings cleared\n")
+		} else {
+			b.WriteString(selectedStyle.Render("✓") + " Windows proxy settings restored\n")
+		}
 	}
 	b.WriteString(selectedStyle.Render("✓") + " Proxy server stopped\n")
 

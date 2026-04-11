@@ -41,8 +41,8 @@ func (f *Failover) Next() *netif.NetInterface {
 		}
 	}
 
-	// All down — return primary as fallback
-	return f.interfaces[0]
+	// All down — return nil
+	return nil
 }
 
 // SetInterfaces updates the list of available interfaces.

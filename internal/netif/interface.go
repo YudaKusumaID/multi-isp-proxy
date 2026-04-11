@@ -139,12 +139,21 @@ func CheckHealth(ni *NetInterface) bool {
 		Timeout:   3 * time.Second,
 		LocalAddr: &net.TCPAddr{IP: ni.IP},
 	}
+	// Try primary check (Cloudflare)
 	conn, err := dialer.Dial("tcp", "1.1.1.1:443")
-	if err != nil {
-		return false
+	if err == nil {
+		conn.Close()
+		return true
 	}
-	conn.Close()
-	return true
+
+	// If Cloudflare fails, try fallback (Google DNS)
+	conn, err = dialer.Dial("tcp", "8.8.8.8:53")
+	if err == nil {
+		conn.Close()
+		return true
+	}
+
+	return false
 }
 
 // Monitor periodically checks the health of all interfaces and updates their status.

@@ -11,7 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/ayanacorp/venn-combine-connection/internal/tui"
-	"github.com/ayanacorp/venn-combine-connection/internal/winproxy"
+	"github.com/ayanacorp/venn-combine-connection/internal/sysproxy"
 )
 
 var version = "0.1.0"
@@ -42,7 +42,7 @@ func main() {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("PANIC: %v — attempting proxy restore", r)
-			winproxy.Disable()
+			sysproxy.Disable()
 		}
 	}()
 
@@ -53,7 +53,7 @@ func main() {
 	go func() {
 		<-sigChan
 		log.Println("Received interrupt signal — restoring proxy settings")
-		winproxy.Disable()
+		sysproxy.Disable()
 		os.Exit(0)
 	}()
 

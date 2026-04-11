@@ -1,4 +1,6 @@
-package winproxy
+//go:build windows
+
+package sysproxy
 
 import (
 	"syscall"
