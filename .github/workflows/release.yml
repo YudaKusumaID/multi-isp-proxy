@@ -54,7 +54,7 @@ jobs:
         run: sha256sum multi-isp-proxy_windows_amd64.exe multi-isp-proxy_linux_amd64 > checksums.txt
 
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@v3.0.0
+        uses: softprops/action-gh-release@v3.0.3
         with:
           name: Multi ISP Proxy ${{ github.ref_name }}
           generate_release_notes: true
