@@ -3,7 +3,7 @@ package balancer
 import (
 	"sync"
 
-	"github.com/ayanacorp/venn-combine-connection/internal/netif"
+	"github.com/YudaKusumaID/multi-isp-proxy/internal/netif"
 )
 
 // Failover always uses the primary interface, switching to secondary only when primary is down.
@@ -22,6 +22,17 @@ func NewFailover(interfaces []*netif.NetInterface) *Failover {
 
 // Next returns the primary interface if alive, otherwise the first alive secondary.
 func (f *Failover) Next() *netif.NetInterface {
+	candidates := f.Candidates()
+	for _, candidate := range candidates {
+		if candidate.IsAlive() {
+			return candidate
+		}
+	}
+	return nil
+}
+
+// Candidates returns every live interface in priority order.
+func (f *Failover) Candidates() []*netif.NetInterface {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -29,30 +40,14 @@ func (f *Failover) Next() *netif.NetInterface {
 		return nil
 	}
 
-	// Always prefer the primary (first) interface
-	if f.interfaces[0].IsAlive() {
-		return f.interfaces[0]
-	}
-
-	// Primary is down, try secondary interfaces in order
-	for i := 1; i < len(f.interfaces); i++ {
-		if f.interfaces[i].IsAlive() {
-			return f.interfaces[i]
+	live := make([]*netif.NetInterface, 0, len(f.interfaces))
+	down := make([]*netif.NetInterface, 0, len(f.interfaces))
+	for _, iface := range f.interfaces {
+		if iface.IsAlive() {
+			live = append(live, iface)
+		} else {
+			down = append(down, iface)
 		}
 	}
-
-	// All down — return nil
-	return nil
-}
-
-// SetInterfaces updates the list of available interfaces.
-func (f *Failover) SetInterfaces(interfaces []*netif.NetInterface) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.interfaces = interfaces
-}
-
-// Mode returns ModeFailover.
-func (f *Failover) Mode() Mode {
-	return ModeFailover
+	return append(live, down...)
 }

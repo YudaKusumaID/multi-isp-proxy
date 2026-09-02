@@ -10,14 +10,14 @@ import (
 
 // NetInterface represents a network interface with its connection details.
 type NetInterface struct {
-	Name      string
+	Name         string
 	FriendlyName string
-	IP        net.IP
-	Gateway   string
-	Alive     bool
-	BytesSent uint64
-	BytesRecv uint64
-	mu        sync.RWMutex
+	IP           net.IP
+	Gateway      string
+	Alive        bool
+	BytesSent    uint64
+	BytesRecv    uint64
+	mu           sync.RWMutex
 }
 
 // IsAlive checks if the interface can reach the internet by dialing a DNS server.
@@ -135,19 +135,27 @@ func Discover() ([]*NetInterface, error) {
 // CheckHealth tests if a network interface can reach the internet
 // by binding to its IP and connecting to a DNS server.
 func CheckHealth(ni *NetInterface) bool {
+	return CheckHealthContext(context.Background(), ni)
+}
+
+// CheckHealthContext tests connectivity while respecting cancellation.
+func CheckHealthContext(ctx context.Context, ni *NetInterface) bool {
 	dialer := &net.Dialer{
 		Timeout:   3 * time.Second,
 		LocalAddr: &net.TCPAddr{IP: ni.IP},
 	}
 	// Try primary check (Cloudflare)
-	conn, err := dialer.Dial("tcp", "1.1.1.1:443")
+	conn, err := dialer.DialContext(ctx, "tcp", "1.1.1.1:443")
 	if err == nil {
 		conn.Close()
 		return true
 	}
+	if ctx.Err() != nil {
+		return false
+	}
 
 	// If Cloudflare fails, try fallback (Google DNS)
-	conn, err = dialer.Dial("tcp", "8.8.8.8:53")
+	conn, err = dialer.DialContext(ctx, "tcp", "8.8.8.8:53")
 	if err == nil {
 		conn.Close()
 		return true
@@ -158,6 +166,36 @@ func CheckHealth(ni *NetInterface) bool {
 
 // Monitor periodically checks the health of all interfaces and updates their status.
 func Monitor(ctx context.Context, interfaces []*NetInterface, interval time.Duration) {
+	MonitorWithChecker(ctx, interfaces, interval, func(ctx context.Context, ni *NetInterface) bool {
+		return CheckHealthContext(ctx, ni)
+	})
+}
+
+// MonitorWithChecker runs an immediate health check, then repeats at interval.
+// Checks are concurrent so one slow ISP does not delay all others.
+func MonitorWithChecker(
+	ctx context.Context,
+	interfaces []*NetInterface,
+	interval time.Duration,
+	checker func(context.Context, *NetInterface) bool,
+) {
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	checkAll := func() {
+		var wg sync.WaitGroup
+		for _, ni := range interfaces {
+			ni := ni
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				ni.SetAlive(checker(ctx, ni))
+			}()
+		}
+		wg.Wait()
+	}
+
+	checkAll()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -166,10 +204,7 @@ func Monitor(ctx context.Context, interfaces []*NetInterface, interval time.Dura
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			for _, ni := range interfaces {
-				alive := CheckHealth(ni)
-				ni.SetAlive(alive)
-			}
+			checkAll()
 		}
 	}
 }

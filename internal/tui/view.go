@@ -17,7 +17,6 @@ var (
 	colorDanger    = lg.Color("#EF4444")
 	colorWarning   = lg.Color("#F59E0B")
 	colorMuted     = lg.Color("#6B7280")
-	colorBg        = lg.Color("#1F2937")
 	colorFg        = lg.Color("#F9FAFB")
 	colorBorder    = lg.Color("#374151")
 
@@ -76,7 +75,7 @@ func (m Model) View() tea.View {
 	var b strings.Builder
 
 	// Header
-	b.WriteString(headerStyle.Render("⚡ Venn Combine Connection"))
+	b.WriteString(headerStyle.Render("⚡ Multi ISP Proxy"))
 	b.WriteString("\n\n")
 
 	switch m.phase {
@@ -209,11 +208,11 @@ func (m Model) viewConfirmWinProxy() string {
 	if runtime.GOOS == "linux" {
 		b.WriteString(titleStyle.Render("Linux Proxy Setup"))
 		b.WriteString("\n\n")
-		b.WriteString("Enable proxy server on this machine?\n\n")
+		b.WriteString("Start the proxy server?\n\n")
 		b.WriteString(subtitleStyle.Render("What this does:"))
 		b.WriteString("\n")
 		b.WriteString("  • Starts HTTP/SOCKS5 proxy on " + selectedStyle.Render(m.proxyAddr) + "\n")
-		b.WriteString("  • Configure your browser to use the proxy address above\n")
+		b.WriteString("  • You will configure your browser or app manually\n")
 		b.WriteString("  • " + selectedStyle.Render("Proxy stops cleanly") + " on exit\n\n")
 	} else {
 		b.WriteString(titleStyle.Render("Windows Proxy Setup"))
@@ -221,17 +220,25 @@ func (m Model) viewConfirmWinProxy() string {
 		b.WriteString("Auto-configure Windows to use this proxy?\n\n")
 		b.WriteString(subtitleStyle.Render("What this does:"))
 		b.WriteString("\n")
-		b.WriteString("  • Sets system SOCKS proxy to " + selectedStyle.Render(m.proxyAddr) + "\n")
+		b.WriteString("  • Sets the Windows HTTP proxy to " + selectedStyle.Render(m.proxyAddr) + "\n")
 		b.WriteString("  • Bypasses localhost and local networks\n")
 		b.WriteString("  • " + selectedStyle.Render("Automatically restores") + " original settings on exit\n\n")
 	}
 
 	if m.err != nil {
 		b.WriteString(errorStyle.Render("Error: "+m.err.Error()) + "\n\n")
+		if m.cleanupPending {
+			b.WriteString(errorStyle.Render("Cleanup is incomplete; press q to retry and exit.") + "\n\n")
+		}
 	}
 
-	b.WriteString(subtitleStyle.Render("[Y]") + " Yes, auto-setup    ")
-	b.WriteString(subtitleStyle.Render("[N]") + " No, I'll configure manually\n\n")
+	if runtime.GOOS == "linux" {
+		b.WriteString(subtitleStyle.Render("[Y]") + " Start    ")
+		b.WriteString(subtitleStyle.Render("[N]") + " Back\n\n")
+	} else {
+		b.WriteString(subtitleStyle.Render("[Y]") + " Yes, auto-setup    ")
+		b.WriteString(subtitleStyle.Render("[N]") + " No, I'll configure manually\n\n")
+	}
 
 	b.WriteString(helpStyle.Render("Y/N: choose • Esc: back • q: quit"))
 
@@ -248,10 +255,10 @@ func (m Model) viewRunning() string {
 	// Proxy info
 	b.WriteString(subtitleStyle.Render("HTTP Proxy: "))
 	b.WriteString(selectedStyle.Render(m.proxyAddr))
-	if m.proxyServer != nil && m.proxyServer.Socks5Addr() != "" {
+	if m.session != nil && m.session.Socks5Addr() != "" {
 		b.WriteString("  ")
 		b.WriteString(subtitleStyle.Render("SOCKS5: "))
-		b.WriteString(selectedStyle.Render(m.proxyServer.Socks5Addr()))
+		b.WriteString(selectedStyle.Render(m.session.Socks5Addr()))
 	}
 	b.WriteString("\n")
 	b.WriteString(subtitleStyle.Render("Mode: "))
@@ -298,8 +305,8 @@ func (m Model) viewRunning() string {
 
 	// Proxy stats
 	b.WriteString("\n")
-	if m.proxyServer != nil {
-		stats := m.proxyServer.GetStats()
+	if m.session != nil {
+		stats := m.session.Stats()
 		b.WriteString(subtitleStyle.Render("Connections"))
 		b.WriteString("\n")
 		b.WriteString(mutedStyle.Render("─────────────────────────────────────────────────"))

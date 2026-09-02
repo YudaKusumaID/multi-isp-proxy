@@ -1,146 +1,172 @@
+# Multi ISP Proxy
 
-# Venn Combine Connection ⚡ - Multi-ISP Proxy Tool
+[![CI](https://github.com/YudaKusumaID/multi-isp-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/YudaKusumaID/multi-isp-proxy/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/YudaKusumaID/multi-isp-proxy)](https://github.com/YudaKusumaID/multi-isp-proxy/releases)
+[![License](https://img.shields.io/github/license/YudaKusumaID/multi-isp-proxy)](LICENSE)
 
-![Go Version](https://img.shields.io/github/go-mod/go-version/YudaKusumaID/multi-isp-proxy)
-![GitHub release (latest by date)](https://img.shields.io/github/v/release/YudaKusumaID/multi-isp-proxy)
-![License](https://img.shields.io/github/license/YudaKusumaID/multi-isp-proxy)
-![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-blue)
-![Contributions Welcome](https://img.shields.io/badge/contributions-welcome-brightgreen)
+Multi ISP Proxy is a local HTTP and SOCKS5 proxy that distributes new outbound
+connections across selected network interfaces. It is intended for machines
+with multiple active internet connections, such as Wi-Fi, Ethernet, or mobile
+tethering.
 
-**Venn Combine Connection** is a lightweight, interactive CLI tool for Windows and Linux that empowers you to aggregate multiple internet connections into a single, high-performance proxy — effectively enabling **internet bonding** and **link aggregation** at the application level.
+Windows is the primary supported platform. Linux support is experimental and
+is validated by GitHub Actions on Ubuntu; Linux system-proxy configuration is
+still manual.
 
-Acting as both an **HTTP CONNECT** and **SOCKS5 proxy**, Venn intelligently distributes network traffic across all your active interfaces (Wi-Fi, Ethernet, Tethering, Cellular) to maximize bandwidth and ensure network redundancy. Think of it as a **multi-WAN load balancer** that runs entirely from your terminal.
+## What it does
 
-## 🎯 Use Cases (Why use Venn?)
-- **Bandwidth Aggregation / Internet Bonding:** Combine your Wi-Fi and mobile tethering to speed up heavy downloads and achieve higher throughput via connection pooling.
-- **Connection Reliability & Failover:** Stream or game without interruption using the Failover mode; if your Wi-Fi drops, Ethernet/Cellular takes over instantly — true **multi-WAN redundancy**.
-- **Network Engineering & Testing:** Easily test and route packets across multiple ISPs simultaneously without complex OS-level routing tables or dedicated hardware.
+- Runs an HTTP proxy on `127.0.0.1:1080` by default.
+- Runs a SOCKS5 proxy on the next port, `127.0.0.1:1081` by default, when that
+  port is available.
+- Selects an outbound interface using round-robin or failover mode.
+- Can configure and restore the current-user Windows HTTP proxy.
+- Displays interface health, traffic counters, and connection counts in a TUI.
 
-## 🚀 Core Features
+Load balancing happens per connection, not per packet. A single TCP connection
+uses one interface and will not migrate seamlessly if that interface goes
+offline. Multi-connection applications can use more than one interface, but
+this is not equivalent to network-layer bonding.
 
-- **Multi-Interface Load Balancing**: Seamlessly combine 2 or more active internet adapters into a unified proxy endpoint.
-- **Smart Routing Strategies**:
-  - **Round-Robin**: Distributes connections evenly across all selected interfaces. Ideal for load balancing and heavy browsing.
-  - **Failover**: Assigns a primary interface and automatically routes traffic to secondary ones if the primary goes offline.
-- **Interactive TUI (Terminal User Interface)**: A beautiful, responsive terminal dashboard built with Bubbletea for real-time monitoring and easy interface selection.
-- **System Proxy Integration**:
-  - **Auto-Config (Windows)**: Automatically injects proxy settings into the Windows system. (For Linux, manual configuration in browser/app is required).
-  - **Magic Restore (Windows)**: Safely backs up and restores your original Windows proxy settings upon exit.
-- **Dual Protocol Support**: 
-  - `HTTP CONNECT` Proxy (Default: port 1080) - Universal compatibility.
-  - `SOCKS5` Proxy (Default: port 1081) - For raw TCP/UDP packet routing.
-- **Live Telemetry**: Track bytes sent/received and active connection counts per interface in real-time.
+## Platform status
 
-## ⚙️ How It Works
+| Platform | Status | System proxy |
+| --- | --- | --- |
+| Windows 10/11 | Primary | Optional automatic setup and restore |
+| Ubuntu/Linux | Experimental | Manual application configuration |
 
-```mermaid
-graph LR
-    A[Your Browser / App] -->|HTTP or SOCKS5| B(Venn Proxy)
-    B -->|Round-Robin / Failover| C[Wi-Fi Adapter]
-    B -->|Round-Robin / Failover| D[Ethernet Adapter]
-    B -->|Round-Robin / Failover| E[Cellular / Tethering]
-    C --> F((Internet))
-    D --> F
-    E --> F
-```
+SOCKS5 TCP is supported. SOCKS5 UDP is experimental and should be verified with
+the target application before relying on it.
 
-Venn sits between your applications and the internet as a local proxy server. When a connection request comes in, the **routing engine** selects which network adapter to use based on your chosen strategy:
+## Installation
 
-1. **Round-Robin** cycles through all active interfaces, distributing load evenly.
-2. **Failover** sends all traffic through your primary adapter and only switches when it detects the primary is down.
+Download one of these assets from the
+[latest release](https://github.com/YudaKusumaID/multi-isp-proxy/releases):
 
-On Windows, proxy settings are automatically configured, so every app that respects system proxy settings will benefit. On Linux, simply configure your specific applications (e.g. Firefox, Curl) to point to the proxy address.
+- `multi-isp-proxy_windows_amd64.exe`
+- `multi-isp-proxy_linux_amd64`
+- `checksums.txt`
 
-## 🛠 Installation
+Verify the downloaded binary against `checksums.txt` before running it.
 
-### Prerequisites
-- Windows OS (Windows 10/11) or Linux
-- [Go](https://go.dev/dl/) 1.25 or later (Only if building from source)
+## Build from source
 
-### Quick Start (Windows)
-1. Download the latest `venn.exe` from the [Releases](https://github.com/YudaKusumaID/multi-isp-proxy/releases) page.
-2. Run the executable in your terminal (PowerShell or CMD).
+Go uses the version declared in [`go.mod`](go.mod).
 
-### Build From Source
 ```sh
-# Clone the repository
 git clone https://github.com/YudaKusumaID/multi-isp-proxy.git
 cd multi-isp-proxy
-
-# Build the binary
-go build -o venn.exe ./cmd/  # On Windows
-go build -o venn ./cmd/      # On Linux
-
-# Run the tool
-.\venn.exe  # On Windows
-./venn      # On Linux
+go mod download
 ```
 
-## 📖 Usage Guide
+Windows PowerShell:
 
-1. **Launch**: Start `venn.exe`. *(Tip: Run with `-addr :8080` to assign a custom port).*
-2. **Select Interfaces**: Use `↑/↓` arrow keys to navigate and `Space` to toggle the network adapters you want to combine. Press `a` to select all, then `Enter` to confirm.
-3. **Choose Strategy**: Select between `Round-Robin` or `Failover` mode.
-4. **System Auto-Proxy (Windows)**: When prompted, press `Y` to automatically configure Windows to route traffic through Venn. Your original settings will be magically restored when you quit. (Linux users can skip this and manually configure `127.0.0.1:1080` in their browsers).
-5. **Dashboard Controls**: Monitor traffic in real-time. Press `r` to reset statistics or `q` to safely exit the application.
+```powershell
+New-Item -ItemType Directory -Force dist | Out-Null
+go build -o dist/multi-isp-proxy.exe ./cmd/multi-isp-proxy
+.\dist\multi-isp-proxy.exe
+```
 
-## ❓ FAQ & Troubleshooting
+Linux:
 
-<details>
-<summary><b>How do I combine Wi-Fi and Ethernet on Windows?</b></summary>
+```sh
+mkdir -p dist
+go build -o dist/multi-isp-proxy ./cmd/multi-isp-proxy
+./dist/multi-isp-proxy
+```
 
-Simply run `venn.exe`, select both your Wi-Fi and Ethernet adapters from the list, choose **Round-Robin** mode, and enable Auto-Proxy. All your internet traffic will now be distributed across both connections.
-</details>
+Build output belongs in `dist/`, which is ignored by Git.
 
-<details>
-<summary><b>Does Venn actually increase my download speed?</b></summary>
+## Usage
 
-Yes, but with a caveat. Venn distributes **connections** (not individual packets) across interfaces. This means multi-threaded downloads (like those from download managers or torrents) will see a real speed boost. A single-threaded download will still use one interface at a time.
-</details>
+```text
+multi-isp-proxy [-addr 127.0.0.1:1080] [-allow-remote] [-auth-file PATH] [-version]
+```
 
-<details>
-<summary><b>Will Venn work with any application?</b></summary>
+1. Select one or more interfaces.
+2. Choose round-robin or failover mode.
+3. On Windows, choose whether the application may configure the current-user
+   HTTP proxy. On Linux, configure the browser or application manually.
+4. Press `r` to reset displayed counters or `q` to stop and restore settings.
 
-Venn works with any application that respects Windows system proxy settings (browsers, most download managers, etc.). For apps that don't, you can manually configure them to use `127.0.0.1:1080` (HTTP) or `127.0.0.1:1081` (SOCKS5).
-</details>
+Use a complete loopback address when changing the port:
 
-<details>
-<summary><b>My proxy settings weren't restored after a crash. How do I fix this?</b></summary>
+```powershell
+.\dist\multi-isp-proxy.exe -addr 127.0.0.1:8080
+```
 
-Venn automatically backs up your proxy settings. If the application crashes unexpectedly, simply run `venn.exe` again and exit it gracefully with `q` — your original settings will be restored.
-</details>
+Loopback is enforced by default. A wildcard, LAN, or other non-loopback address
+is rejected unless `-allow-remote` is supplied. Remote mode also requires
+non-empty credentials, shared by HTTP Basic proxy authentication and SOCKS5
+username/password authentication.
 
-<details>
-<summary><b>Can I use Venn as a SOCKS5 proxy for gaming or specific apps?</b></summary>
+Prefer an environment variable so the secret is not exposed in command-line
+history or process arguments:
 
-Yes! Venn exposes a SOCKS5 proxy on port `1081` by default. Configure your game or application to use `127.0.0.1:1081` as a SOCKS5 proxy to route its traffic through your combined connections.
-</details>
+```powershell
+$env:MULTI_ISP_PROXY_AUTH = "proxy-user:use-a-long-random-password"
+.\dist\multi-isp-proxy.exe -addr 0.0.0.0:1080 -allow-remote
+```
 
-## 🤝 Contributing
+Alternatively, put `username:password` in a user-readable credential file and
+pass `-auth-file PATH`. Do not use both methods. Remote mode should also be
+restricted with the operating-system firewall; it is not intended to be an
+internet-facing public proxy. See [SECURITY.md](SECURITY.md).
 
-Contributions are welcome! Whether it's bug reports, feature requests, or pull requests — every bit helps.
+## Logs
 
-1. **Fork** the repository.
-2. **Create** your feature branch: `git checkout -b feature/amazing-feature`
-3. **Commit** your changes: `git commit -m 'Add amazing feature'`
-4. **Push** to the branch: `git push origin feature/amazing-feature`
-5. **Open** a Pull Request.
+New runs write `multi-isp-proxy.log` below the operating system's user cache
+directory instead of the repository root. At 5 MiB, it rotates to
+`multi-isp-proxy.log.1`:
 
-Please check the [Issues](https://github.com/YudaKusumaID/multi-isp-proxy/issues) page for open tasks and bug reports.
+- Windows: `%LocalAppData%\multi-isp-proxy\multi-isp-proxy.log`
+- Linux: `$XDG_CACHE_HOME/multi-isp-proxy/multi-isp-proxy.log`, or
+  `~/.cache/multi-isp-proxy/multi-isp-proxy.log`
 
-## 🛡 License
+Existing `venn.log` and old binaries may be kept under `dist/legacy/`; they are
+not used by the new build workflow.
 
-This project is open-sourced software licensed under the [MIT License](LICENSE).
+## Crash recovery and single instance
 
-## 🙏 Credits & Acknowledgements
+Only one instance may run per user. Before changing Windows proxy settings, the
+application writes a recovery journal below the user configuration directory.
+After power loss or hard termination, the next launch restores the saved values
+before opening the TUI. If the current settings were changed externally after
+the crash, recovery refuses to overwrite them and preserves the journal for
+manual inspection.
 
-Venn is built on the shoulders of giants:
-- [Bubbletea](https://github.com/charmbracelet/bubbletea) & [Lipgloss](https://github.com/charmbracelet/lipgloss) for the stunning TUI.
-- [go-socks5](https://github.com/things-go/go-socks5) for the robust SOCKS5 implementation.
-- [golang/sys](https://github.com/golang/sys) for low-level OS interactions.
+Typical Windows files:
 
----
-<div align="center">
-  Developed by <a href="https://github.com/YudaKusumaID"><b>Yuda Kusuma</b></a> <br>
-  <i>Empowering open-source network engineers.</i>
-</div>
+- `%AppData%\multi-isp-proxy\instance.lock`
+- `%AppData%\multi-isp-proxy\proxy-recovery.json`
+
+Do not delete the recovery journal while Multi ISP Proxy controls the Windows
+proxy. For conflict recovery guidance, see [SECURITY.md](SECURITY.md).
+
+## Architecture
+
+Runtime ownership, dependency direction, lifecycle invariants, and protocol
+boundaries are documented in [docs/architecture.md](docs/architecture.md).
+
+## Development
+
+Run the local verification commands before opening a pull request:
+
+```sh
+gofmt -w .
+go mod tidy
+go vet ./...
+go test -race ./...
+```
+
+CI runs formatting, module consistency, vet, tests, and the race detector on
+Linux, plus native tests on Windows. Tagging a commit with a semantic version
+such as `v1.2.0` runs the same CI before producing release binaries.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Linux support was initially contributed by
+[@anugrahiyyan](https://github.com/anugrahiyyan).
+
+## License
+
+Licensed under the [MIT License](LICENSE).

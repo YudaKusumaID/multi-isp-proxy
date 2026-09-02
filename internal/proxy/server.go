@@ -3,11 +3,15 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"crypto/subtle"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,8 +19,16 @@ import (
 
 	"github.com/things-go/go-socks5"
 
-	"github.com/ayanacorp/venn-combine-connection/internal/balancer"
-	"github.com/ayanacorp/venn-combine-connection/internal/netif"
+	"github.com/YudaKusumaID/multi-isp-proxy/internal/balancer"
+	"github.com/YudaKusumaID/multi-isp-proxy/internal/netif"
+)
+
+const (
+	defaultDialTimeout        = 15 * time.Second
+	defaultDialAttemptTimeout = 5 * time.Second
+	defaultReadHeaderTimeout  = 10 * time.Second
+	defaultIdleTimeout        = 90 * time.Second
+	defaultResponseTimeout    = 30 * time.Second
 )
 
 // Stats holds proxy server statistics.
@@ -25,247 +37,532 @@ type Stats struct {
 	TotalConnections  int64
 }
 
-// Server wraps both HTTP CONNECT and SOCKS5 proxy with multi-interface load balancing.
-type Server struct {
-	bal          balancer.Strategy
-	httpAddr     string
-	socks5Addr   string
-	httpListener net.Listener
-	socks5Server *socks5.Server
-	socks5Ln     net.Listener
-	stats        Stats
-	mu           sync.RWMutex
-	cancelCtx    context.CancelFunc
-	ctx          context.Context
+// Config controls listener security and network timeouts.
+type Config struct {
+	HTTPAddr              string
+	AllowRemote           bool
+	Username              string
+	Password              string
+	DialTimeout           time.Duration
+	DialAttemptTimeout    time.Duration
+	ReadHeaderTimeout     time.Duration
+	IdleTimeout           time.Duration
+	ResponseHeaderTimeout time.Duration
 }
 
-// NewServer creates a new proxy server that distributes connections via the balancer.
-// httpAddr is used for the HTTP CONNECT proxy (Windows system proxy).
-// SOCKS5 runs on httpAddr port + 1 as a secondary option.
+// Server serves HTTP CONNECT, plain HTTP, and SOCKS5 through a balancer.
+// A Server is single-use: create a new instance after Stop.
+type Server struct {
+	config Config
+	bal    balancer.Strategy
+
+	socks5Addr   string
+	socks5Server *socks5.Server
+	httpServer   *http.Server
+	transport    *http.Transport
+	httpLn       net.Listener
+	socks5Ln     net.Listener
+
+	stats Stats
+
+	mu      sync.Mutex
+	started bool
+	cancel  context.CancelFunc
+	done    chan struct{}
+	runErr  error
+	active  map[net.Conn]struct{}
+	dial    func(context.Context, string, string, net.Addr) (net.Conn, error)
+}
+
+// NewServer creates a loopback-only server with safe timeout defaults.
 func NewServer(httpAddr string, bal balancer.Strategy) *Server {
+	return NewServerWithConfig(Config{HTTPAddr: httpAddr}, bal)
+}
+
+// NewServerWithConfig creates a server with explicit listener settings.
+func NewServerWithConfig(config Config, bal balancer.Strategy) *Server {
+	if config.DialTimeout <= 0 {
+		config.DialTimeout = defaultDialTimeout
+	}
+	if config.DialAttemptTimeout <= 0 || config.DialAttemptTimeout > config.DialTimeout {
+		config.DialAttemptTimeout = min(defaultDialAttemptTimeout, config.DialTimeout)
+	}
+	if config.ReadHeaderTimeout <= 0 {
+		config.ReadHeaderTimeout = defaultReadHeaderTimeout
+	}
+	if config.IdleTimeout <= 0 {
+		config.IdleTimeout = defaultIdleTimeout
+	}
+	if config.ResponseHeaderTimeout <= 0 {
+		config.ResponseHeaderTimeout = defaultResponseTimeout
+	}
+
 	s := &Server{
-		bal:      bal,
-		httpAddr: httpAddr,
+		config: config,
+		bal:    bal,
+		active: make(map[net.Conn]struct{}),
+		dial: func(ctx context.Context, network, addr string, localAddr net.Addr) (net.Conn, error) {
+			dialer := &net.Dialer{
+				Timeout:   config.DialAttemptTimeout,
+				KeepAlive: 30 * time.Second,
+				LocalAddr: localAddr,
+			}
+			return dialer.DialContext(ctx, network, addr)
+		},
 	}
 
-	// Parse HTTP addr to calculate SOCKS5 addr (port + 1)
-	host, port, err := net.SplitHostPort(httpAddr)
-	if err == nil {
-		var portNum int
-		fmt.Sscanf(port, "%d", &portNum)
-		s.socks5Addr = fmt.Sprintf("%s:%d", host, portNum+1)
-	}
-
-	// Create SOCKS5 server
-	socks5Server := socks5.NewServer(
+	options := []socks5.Option{
 		socks5.WithDial(s.dialWithBalancer),
 		socks5.WithLogger(socks5.NewLogger(log.New(log.Writer(), "socks5: ", log.LstdFlags))),
-	)
-	s.socks5Server = socks5Server
-
+	}
+	if config.Username != "" || config.Password != "" {
+		credentials := socks5.StaticCredentials{config.Username: config.Password}
+		options = append(options,
+			socks5.WithCredential(credentials),
+			socks5.WithAuthMethods([]socks5.Authenticator{
+				socks5.UserPassAuthenticator{Credentials: credentials},
+			}),
+		)
+	}
+	s.socks5Server = socks5.NewServer(options...)
 	return s
 }
 
-// dialWithBalancer is the custom dialer that binds to a specific interface.
-func (s *Server) dialWithBalancer(ctx context.Context, network, addr string) (net.Conn, error) {
-	iface := s.bal.Next()
-	if iface == nil {
-		return nil, fmt.Errorf("no available network interface")
+// Start binds listeners synchronously before returning. This readiness
+// guarantee lets callers change system proxy settings only after the proxy is
+// actually reachable.
+func (s *Server) Start(parent context.Context) error {
+	if err := validateListenerSecurity(s.config); err != nil {
+		return err
+	}
+	if s.bal == nil {
+		return errors.New("proxy balancer is required")
+	}
+	if err := parent.Err(); err != nil {
+		return fmt.Errorf("start proxy: %w", err)
 	}
 
-	dialer := &net.Dialer{
-		Timeout:   15 * time.Second,
-		KeepAlive: 30 * time.Second,
-		LocalAddr: &net.TCPAddr{IP: iface.IP},
+	s.mu.Lock()
+	if s.started {
+		s.mu.Unlock()
+		return errors.New("proxy server already started")
 	}
+	s.started = true
+	s.mu.Unlock()
 
-	conn, err := dialer.DialContext(ctx, network, addr)
+	httpLn, err := net.Listen("tcp", s.config.HTTPAddr)
 	if err != nil {
-		log.Printf("[proxy] dial via %s to %s failed: %v", iface.IP, addr, err)
-		return nil, fmt.Errorf("dial via %s failed: %w", iface.String(), err)
+		return fmt.Errorf("listen HTTP on %s: %w", s.config.HTTPAddr, err)
 	}
 
-	log.Printf("[proxy] connected via %s to %s", iface.IP, addr)
-
-	// Track statistics
-	atomic.AddInt64(&s.stats.TotalConnections, 1)
-	atomic.AddInt64(&s.stats.ActiveConnections, 1)
-
-	// Wrap connection to track when it closes
-	return &trackedConn{
-		Conn:  conn,
-		iface: iface,
-		onClose: func() {
-			atomic.AddInt64(&s.stats.ActiveConnections, -1)
-		},
-	}, nil
-}
-
-// dialDirect creates a connection via the load balancer (used by HTTP proxy handler).
-func (s *Server) dialDirect(network, addr string) (net.Conn, error) {
-	return s.dialWithBalancer(context.Background(), network, addr)
-}
-
-// Start begins listening and serving both HTTP and SOCKS5 proxy.
-func (s *Server) Start(ctx context.Context) error {
-	s.ctx, s.cancelCtx = context.WithCancel(ctx)
-
-	// Start HTTP CONNECT proxy (primary — used by Windows system proxy)
-	httpLn, err := net.Listen("tcp", s.httpAddr)
-	if err != nil {
-		s.cancelCtx()
-		return fmt.Errorf("failed to listen HTTP on %s: %w", s.httpAddr, err)
-	}
-	s.httpListener = httpLn
-	log.Printf("[proxy] HTTP CONNECT proxy listening on %s", s.httpAddr)
-
-	// Start SOCKS5 proxy (secondary)
-	if s.socks5Addr != "" {
-		socks5Ln, err := net.Listen("tcp", s.socks5Addr)
+	socksAddr := deriveSOCKS5Addr(s.config.HTTPAddr)
+	var socksLn net.Listener
+	if socksAddr != "" {
+		socksLn, err = net.Listen("tcp", socksAddr)
 		if err != nil {
-			log.Printf("[proxy] SOCKS5 listener failed on %s: %v (continuing without SOCKS5)", s.socks5Addr, err)
-		} else {
-			s.socks5Ln = socks5Ln
-			log.Printf("[proxy] SOCKS5 proxy listening on %s", s.socks5Addr)
-			go func() {
-				if err := s.socks5Server.Serve(socks5Ln); err != nil && s.ctx.Err() == nil {
-					log.Printf("[proxy] SOCKS5 server error: %v", err)
-				}
-			}()
+			log.Printf("[proxy] SOCKS5 listener unavailable on %s: %v", socksAddr, err)
+			socksAddr = ""
 		}
 	}
 
-	// Context cancellation cleanup
+	ctx, cancel := context.WithCancel(parent)
+	transport := &http.Transport{
+		Proxy:                 nil,
+		DialContext:           s.dialWithBalancer,
+		ForceAttemptHTTP2:     false,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       s.config.IdleTimeout,
+		ResponseHeaderTimeout: s.config.ResponseHeaderTimeout,
+		ExpectContinueTimeout: time.Second,
+	}
+	httpServer := &http.Server{
+		Handler:           s,
+		ReadHeaderTimeout: s.config.ReadHeaderTimeout,
+		IdleTimeout:       s.config.IdleTimeout,
+		MaxHeaderBytes:    1 << 20,
+		ErrorLog:          log.New(log.Writer(), "http-proxy: ", log.LstdFlags),
+	}
+
+	s.mu.Lock()
+	s.cancel = cancel
+	s.done = make(chan struct{})
+	s.httpLn = httpLn
+	s.socks5Ln = socksLn
+	s.socks5Addr = socksAddr
+	s.transport = transport
+	s.httpServer = httpServer
+	done := s.done
+	s.mu.Unlock()
+
+	log.Printf("[proxy] HTTP proxy listening on %s", httpLn.Addr())
+	if socksLn != nil {
+		log.Printf("[proxy] SOCKS5 proxy listening on %s", socksLn.Addr())
+		go func() {
+			if serveErr := s.socks5Server.Serve(socksLn); serveErr != nil && ctx.Err() == nil {
+				log.Printf("[proxy] SOCKS5 server error: %v", serveErr)
+			}
+		}()
+	}
+
 	go func() {
-		<-s.ctx.Done()
-		httpLn.Close()
-		if s.socks5Ln != nil {
-			s.socks5Ln.Close()
+		serveErr := httpServer.Serve(httpLn)
+		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) && ctx.Err() == nil {
+			s.setRunError(fmt.Errorf("HTTP proxy server: %w", serveErr))
 		}
+		cancel()
+		close(done)
 	}()
 
-	// Serve HTTP CONNECT proxy (blocking)
-	return s.serveHTTP(httpLn)
+	go func() {
+		<-ctx.Done()
+		s.closeResources()
+	}()
+
+	return nil
 }
 
-// serveHTTP handles incoming HTTP proxy connections.
-func (s *Server) serveHTTP(ln net.Listener) error {
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			if s.ctx.Err() != nil {
-				return nil // Graceful shutdown
-			}
-			log.Printf("[proxy] accept error: %v", err)
-			continue
-		}
-		go s.handleHTTPConnection(conn)
+// Wait blocks until the primary HTTP server exits.
+func (s *Server) Wait() error {
+	s.mu.Lock()
+	done := s.done
+	s.mu.Unlock()
+	if done == nil {
+		return errors.New("proxy server has not started")
+	}
+	<-done
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.runErr
+}
+
+// Stop closes listeners and active tunnels, then waits for the HTTP server.
+func (s *Server) Stop() {
+	s.mu.Lock()
+	cancel := s.cancel
+	done := s.done
+	s.mu.Unlock()
+	if cancel == nil {
+		return
+	}
+	cancel()
+	s.closeResources()
+	if done != nil {
+		<-done
 	}
 }
 
-// handleHTTPConnection processes a single HTTP proxy connection.
-func (s *Server) handleHTTPConnection(clientConn net.Conn) {
-	defer clientConn.Close()
+func (s *Server) closeResources() {
+	s.mu.Lock()
+	httpServer := s.httpServer
+	httpLn := s.httpLn
+	socksLn := s.socks5Ln
+	transport := s.transport
+	connections := make([]net.Conn, 0, len(s.active))
+	for conn := range s.active {
+		connections = append(connections, conn)
+	}
+	s.mu.Unlock()
 
-	br := bufio.NewReader(clientConn)
-	req, err := http.ReadRequest(br)
-	if err != nil {
-		log.Printf("[proxy] failed to read request: %v", err)
+	if httpServer != nil {
+		_ = httpServer.Close()
+	} else if httpLn != nil {
+		_ = httpLn.Close()
+	}
+	if socksLn != nil {
+		_ = socksLn.Close()
+	}
+	if transport != nil {
+		transport.CloseIdleConnections()
+	}
+	for _, conn := range connections {
+		_ = conn.Close()
+	}
+}
+
+func (s *Server) setRunError(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.runErr == nil {
+		s.runErr = err
+	}
+}
+
+// ServeHTTP implements both CONNECT tunneling and normal HTTP forwarding.
+func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if !s.authorized(req) {
+		w.Header().Set("Proxy-Authenticate", `Basic realm="multi-isp-proxy"`)
+		http.Error(w, "proxy authentication required", http.StatusProxyAuthRequired)
 		return
 	}
 
 	if req.Method == http.MethodConnect {
-		s.handleConnect(clientConn, req)
-	} else {
-		s.handleHTTPForward(clientConn, req, br)
+		s.handleConnect(w, req)
+		return
 	}
+	s.handleForward(w, req)
 }
 
-// handleConnect handles HTTPS tunneling via HTTP CONNECT.
-func (s *Server) handleConnect(clientConn net.Conn, req *http.Request) {
-	// Connect to the target via the load balancer
-	targetConn, err := s.dialDirect("tcp", req.Host)
+func (s *Server) authorized(req *http.Request) bool {
+	if s.config.Username == "" && s.config.Password == "" {
+		return true
+	}
+
+	value := req.Header.Get("Proxy-Authorization")
+	scheme, encoded, ok := strings.Cut(value, " ")
+	if !ok || !strings.EqualFold(scheme, "Basic") {
+		return false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		fmt.Fprintf(clientConn, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
-		log.Printf("[proxy] CONNECT to %s failed: %v", req.Host, err)
-		return
+		return false
 	}
-	defer targetConn.Close()
-
-	// Send 200 Connection Established
-	fmt.Fprintf(clientConn, "HTTP/1.1 200 Connection Established\r\n\r\n")
-
-	// Bidirectional copy
-	s.tunnel(clientConn, targetConn)
+	username, password, ok := strings.Cut(string(decoded), ":")
+	if !ok {
+		return false
+	}
+	usernameOK := subtle.ConstantTimeCompare([]byte(username), []byte(s.config.Username))
+	passwordOK := subtle.ConstantTimeCompare([]byte(password), []byte(s.config.Password))
+	return usernameOK&passwordOK == 1
 }
 
-// handleHTTPForward forwards plain HTTP requests.
-func (s *Server) handleHTTPForward(clientConn net.Conn, req *http.Request, br *bufio.Reader) {
-	// Determine target host
-	host := req.Host
-	if !strings.Contains(host, ":") {
-		host = host + ":80"
-	}
-
-	// Connect to target via load balancer
-	targetConn, err := s.dialDirect("tcp", host)
+func (s *Server) handleConnect(w http.ResponseWriter, req *http.Request) {
+	target, err := normalizeTarget(req.Host, "443")
 	if err != nil {
-		fmt.Fprintf(clientConn, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
-		log.Printf("[proxy] HTTP forward to %s failed: %v", host, err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	targetConn, err := s.dialWithBalancer(req.Context(), "tcp", target)
+	if err != nil {
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+		log.Printf("[proxy] CONNECT to %s failed: %v", target, err)
+		return
+	}
+
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		_ = targetConn.Close()
+		http.Error(w, "CONNECT unsupported", http.StatusInternalServerError)
+		return
+	}
+	clientConn, buffered, err := hijacker.Hijack()
+	if err != nil {
+		_ = targetConn.Close()
+		return
+	}
+	client := &bufferedConn{Conn: clientConn, reader: buffered.Reader}
+	if _, err := buffered.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+		_ = client.Close()
+		_ = targetConn.Close()
+		return
+	}
+	if err := buffered.Flush(); err != nil {
+		_ = client.Close()
+		_ = targetConn.Close()
+		return
+	}
+
+	s.track(client)
+	s.track(targetConn)
+	defer s.untrack(client)
+	defer s.untrack(targetConn)
+	defer client.Close()
 	defer targetConn.Close()
-
-	// Remove proxy headers
-	req.Header.Del("Proxy-Connection")
-	req.Header.Del("Proxy-Authorization")
-
-	// Forward the request
-	req.RequestURI = req.URL.Path
-	if req.URL.RawQuery != "" {
-		req.RequestURI += "?" + req.URL.RawQuery
-	}
-
-	if err := req.Write(targetConn); err != nil {
-		log.Printf("[proxy] failed to forward request: %v", err)
-		return
-	}
-
-	// Pipe response back
-	s.tunnel(clientConn, targetConn)
+	s.tunnel(client, targetConn)
 }
 
-// tunnel copies data bidirectionally between two connections.
+func (s *Server) handleForward(w http.ResponseWriter, req *http.Request) {
+	if req.URL.Scheme == "" {
+		req.URL.Scheme = "http"
+	}
+	if req.URL.Host == "" {
+		req.URL.Host = req.Host
+	}
+	if !strings.EqualFold(req.URL.Scheme, "http") {
+		http.Error(w, "use CONNECT for non-HTTP destinations", http.StatusBadRequest)
+		return
+	}
+
+	outbound := req.Clone(req.Context())
+	outbound.RequestURI = ""
+	outbound.Header = req.Header.Clone()
+	removeHopByHopHeaders(outbound.Header)
+	outbound.Header.Del("Proxy-Authorization")
+
+	response, err := s.transport.RoundTrip(outbound)
+	if err != nil {
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+		log.Printf("[proxy] HTTP forward to %s failed: %v", req.URL.Host, err)
+		return
+	}
+	defer response.Body.Close()
+	removeHopByHopHeaders(response.Header)
+	copyHeaders(w.Header(), response.Header)
+	w.WriteHeader(response.StatusCode)
+	if _, err := io.Copy(w, response.Body); err != nil {
+		log.Printf("[proxy] copying HTTP response failed: %v", err)
+	}
+}
+
+func removeHopByHopHeaders(header http.Header) {
+	for _, token := range strings.Split(header.Get("Connection"), ",") {
+		if token = strings.TrimSpace(token); token != "" {
+			header.Del(token)
+		}
+	}
+	for _, name := range []string{
+		"Connection", "Proxy-Connection", "Keep-Alive", "Proxy-Authenticate",
+		"Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade",
+	} {
+		header.Del(name)
+	}
+}
+
+func copyHeaders(destination, source http.Header) {
+	for name, values := range source {
+		for _, value := range values {
+			destination.Add(name, value)
+		}
+	}
+}
+
+func normalizeTarget(host, defaultPort string) (string, error) {
+	if host == "" {
+		return "", errors.New("missing destination host")
+	}
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return host, nil
+	}
+	if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil {
+		return net.JoinHostPort(ip.String(), defaultPort), nil
+	}
+	if strings.Contains(host, ":") {
+		return "", fmt.Errorf("invalid destination host %q", host)
+	}
+	return net.JoinHostPort(host, defaultPort), nil
+}
+
+// dialWithBalancer retries every candidate supplied by the strategy.
+func (s *Server) dialWithBalancer(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialCtx, cancel := context.WithTimeout(ctx, s.config.DialTimeout)
+	defer cancel()
+
+	candidates := s.bal.Candidates()
+	if len(candidates) == 0 {
+		return nil, errors.New("no available network interface")
+	}
+
+	var failures []error
+	for _, iface := range candidates {
+		if err := dialCtx.Err(); err != nil {
+			failures = append(failures, err)
+			break
+		}
+		localAddr, err := localAddrForNetwork(network, iface.IP)
+		if err != nil {
+			return nil, err
+		}
+		attemptCtx, attemptCancel := context.WithTimeout(dialCtx, s.config.DialAttemptTimeout)
+		conn, err := s.dial(attemptCtx, network, addr, localAddr)
+		attemptCancel()
+		if err != nil {
+			failures = append(failures, fmt.Errorf("%s: %w", iface.String(), err))
+			log.Printf("[proxy] dial via %s to %s failed: %v", iface.IP, addr, err)
+			continue
+		}
+
+		log.Printf("[proxy] connected via %s to %s", iface.IP, addr)
+		iface.SetAlive(true)
+		atomic.AddInt64(&s.stats.TotalConnections, 1)
+		atomic.AddInt64(&s.stats.ActiveConnections, 1)
+		return &trackedConn{
+			Conn:  conn,
+			iface: iface,
+			onClose: func() {
+				atomic.AddInt64(&s.stats.ActiveConnections, -1)
+			},
+		}, nil
+	}
+	return nil, fmt.Errorf("all network interfaces failed for %s: %w", addr, errors.Join(failures...))
+}
+
+func deriveSOCKS5Addr(httpAddr string) string {
+	host, port, err := net.SplitHostPort(httpAddr)
+	if err != nil {
+		return ""
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber >= 65535 {
+		return ""
+	}
+	return net.JoinHostPort(host, strconv.Itoa(portNumber+1))
+}
+
+func localAddrForNetwork(network string, ip net.IP) (net.Addr, error) {
+	switch {
+	case strings.HasPrefix(network, "tcp"):
+		return &net.TCPAddr{IP: ip}, nil
+	case strings.HasPrefix(network, "udp"):
+		return &net.UDPAddr{IP: ip}, nil
+	default:
+		return nil, fmt.Errorf("unsupported network %q", network)
+	}
+}
+
+func validateListenerSecurity(config Config) error {
+	host, _, err := net.SplitHostPort(config.HTTPAddr)
+	if err != nil {
+		return fmt.Errorf("invalid proxy address %q: %w", config.HTTPAddr, err)
+	}
+	loopback := strings.EqualFold(host, "localhost")
+	if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil {
+		loopback = ip.IsLoopback()
+	}
+	if loopback {
+		return nil
+	}
+	if !config.AllowRemote {
+		return fmt.Errorf("non-loopback address %q requires --allow-remote", config.HTTPAddr)
+	}
+	if config.Username == "" || config.Password == "" {
+		return errors.New("remote proxy access requires both username and password")
+	}
+	return nil
+}
+
 func (s *Server) tunnel(client, target net.Conn) {
-	done := make(chan struct{}, 2)
-
-	go func() {
-		io.Copy(target, client)
-		if tc, ok := target.(*trackedConn); ok {
-			tc.Conn.(*net.TCPConn).CloseWrite()
-		}
-		done <- struct{}{}
-	}()
-
-	go func() {
-		io.Copy(client, target)
-		if tc, ok := client.(*net.TCPConn); ok {
-			tc.CloseWrite()
-		}
-		done <- struct{}{}
-	}()
-
-	<-done
+	var wg sync.WaitGroup
+	wg.Add(2)
+	copyOneWay := func(destination, source net.Conn) {
+		defer wg.Done()
+		_, _ = io.Copy(destination, source)
+		closeWrite(destination)
+	}
+	go copyOneWay(target, client)
+	go copyOneWay(client, target)
+	wg.Wait()
 }
 
-// Stop gracefully shuts down the proxy server.
-func (s *Server) Stop() {
-	if s.cancelCtx != nil {
-		s.cancelCtx()
+func closeWrite(conn net.Conn) {
+	if halfCloser, ok := conn.(interface{ CloseWrite() error }); ok {
+		_ = halfCloser.CloseWrite()
 	}
 }
 
-// GetStats returns a copy of the current stats.
+func (s *Server) track(conn net.Conn) {
+	s.mu.Lock()
+	s.active[conn] = struct{}{}
+	s.mu.Unlock()
+}
+
+func (s *Server) untrack(conn net.Conn) {
+	s.mu.Lock()
+	delete(s.active, conn)
+	s.mu.Unlock()
+}
+
+// GetStats returns a snapshot of proxy connection statistics.
 func (s *Server) GetStats() Stats {
 	return Stats{
 		ActiveConnections: atomic.LoadInt64(&s.stats.ActiveConnections),
@@ -273,17 +570,41 @@ func (s *Server) GetStats() Stats {
 	}
 }
 
-// Addr returns the HTTP proxy listen address.
-func (s *Server) Addr() string {
-	return s.httpAddr
-}
-
-// Socks5Addr returns the SOCKS5 proxy listen address.
+// Socks5Addr returns the active SOCKS5 listener address, if available.
 func (s *Server) Socks5Addr() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.socks5Addr
 }
 
-// trackedConn wraps a net.Conn to track bytes and connection lifecycle per interface.
+// HTTPAddr returns the active HTTP listener address, or the configured address
+// before startup.
+func (s *Server) HTTPAddr() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.httpLn != nil {
+		return s.httpLn.Addr().String()
+	}
+	return s.config.HTTPAddr
+}
+
+type bufferedConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *bufferedConn) Read(buffer []byte) (int, error) {
+	return c.reader.Read(buffer)
+}
+
+func (c *bufferedConn) CloseWrite() error {
+	if halfCloser, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return halfCloser.CloseWrite()
+	}
+	return nil
+}
+
+// trackedConn tracks bytes and connection lifecycle for an interface.
 type trackedConn struct {
 	net.Conn
 	iface   *netif.NetInterface
@@ -292,25 +613,29 @@ type trackedConn struct {
 	mu      sync.Mutex
 }
 
-// Read counts bytes received through this interface.
-func (c *trackedConn) Read(p []byte) (int, error) {
-	n, err := c.Conn.Read(p)
+func (c *trackedConn) Read(buffer []byte) (int, error) {
+	n, err := c.Conn.Read(buffer)
 	if n > 0 && c.iface != nil {
 		c.iface.AddBytesRecv(uint64(n))
 	}
 	return n, err
 }
 
-// Write counts bytes sent through this interface.
-func (c *trackedConn) Write(p []byte) (int, error) {
-	n, err := c.Conn.Write(p)
+func (c *trackedConn) Write(buffer []byte) (int, error) {
+	n, err := c.Conn.Write(buffer)
 	if n > 0 && c.iface != nil {
 		c.iface.AddBytesSent(uint64(n))
 	}
 	return n, err
 }
 
-// Close closes the connection and invokes the onClose callback.
+func (c *trackedConn) CloseWrite() error {
+	if halfCloser, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return halfCloser.CloseWrite()
+	}
+	return nil
+}
+
 func (c *trackedConn) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

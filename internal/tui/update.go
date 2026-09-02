@@ -2,24 +2,21 @@ package tui
 
 import (
 	"context"
+	"errors"
+	"runtime"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/ayanacorp/venn-combine-connection/internal/balancer"
-	"github.com/ayanacorp/venn-combine-connection/internal/netif"
-	"github.com/ayanacorp/venn-combine-connection/internal/proxy"
-	"github.com/ayanacorp/venn-combine-connection/internal/sysproxy"
+	"github.com/YudaKusumaID/multi-isp-proxy/internal/app"
+	"github.com/YudaKusumaID/multi-isp-proxy/internal/balancer"
+	"github.com/YudaKusumaID/multi-isp-proxy/internal/netif"
+	"github.com/YudaKusumaID/multi-isp-proxy/internal/sysproxy"
 )
 
 // Update handles all messages and user input.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		return m, nil
 
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
@@ -30,15 +27,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case proxyStartedMsg:
-		m.phase = PhaseRunning
-		m.message = "Proxy is running!"
-		return m, doTick()
-
 	case proxyErrorMsg:
 		m.err = msg.err
 		m.phase = PhaseStopping
-		return m, nil
+		if cleanupErr := m.Cleanup(); cleanupErr != nil {
+			m.err = errors.Join(m.err, cleanupErr)
+		}
+		return m, tea.Quit
 	}
 
 	return m, nil
@@ -147,11 +142,26 @@ func (m Model) handleSelectMode(key string) (tea.Model, tea.Cmd) {
 
 // handleConfirmWinProxy handles the Windows proxy auto-setup confirmation.
 func (m Model) handleConfirmWinProxy(key string) (tea.Model, tea.Cmd) {
+	if m.cleanupPending {
+		if key == "q" {
+			return m.shutdown()
+		}
+		return m, nil
+	}
+
 	switch key {
 	case "y", "Y":
-		m.winProxyAuto = true
+		m.winProxyAuto = runtime.GOOS == "windows"
 		return m.startProxy()
 	case "n", "N":
+		if runtime.GOOS != "windows" {
+			if m.countSelected() >= 2 {
+				m.phase = PhaseSelectMode
+			} else {
+				m.phase = PhaseSelectInterfaces
+			}
+			return m, nil
+		}
 		m.winProxyAuto = false
 		return m.startProxy()
 	case "backspace", "escape":
@@ -184,35 +194,41 @@ func (m Model) handleRunning(key string) (tea.Model, tea.Cmd) {
 
 // startProxy initializes and starts the proxy with selected interfaces.
 func (m Model) startProxy() (tea.Model, tea.Cmd) {
+	m.err = nil
 	selected := m.getSelectedInterfaces()
 
-	// Create load balancer
-	m.bal = balancer.New(m.mode, selected)
-
-	// Create proxy server
-	m.proxyServer = proxy.NewServer(m.proxyAddr, m.bal)
-
-	// Setup Windows proxy if requested
-	if m.winProxyAuto {
-		backup, err := sysproxy.Backup()
-		if err != nil {
-			m.err = err
-			return m, nil
-		}
-		m.proxyBackup = backup
-
-		if err := sysproxy.Enable(m.proxyAddr); err != nil {
-			m.err = err
-			return m, nil
-		}
+	m.winProxyAuto = m.winProxyAuto && sysproxy.Supported()
+	var systemProxy app.SystemProxy
+	if m.sysProxy != nil {
+		systemProxy = m.sysProxy
 	}
+	m.session = app.NewSession(app.Config{
+		Proxy:           m.proxyConfig,
+		Mode:            m.mode,
+		Interfaces:      selected,
+		AutoSystemProxy: m.winProxyAuto,
+		SystemProxy:     systemProxy,
+		HealthInterval:  5 * time.Second,
+	})
 
-	// Start health monitor
-	go netif.Monitor(context.Background(), selected, 5*time.Second)
+	m.lifecycle.mu.Lock()
+	m.lifecycle.cleaned = false
+	m.lifecycle.session = m.session
+	m.lifecycle.mu.Unlock()
 
-	// Start proxy in background
+	if err := m.session.Start(context.Background()); err != nil {
+		m.err = err
+		if cleanupErr := m.Cleanup(); cleanupErr != nil {
+			m.err = errors.Join(m.err, cleanupErr)
+			m.cleanupPending = true
+		}
+		return m, nil
+	}
+	m.cleanupPending = false
+	m.proxyAddr = m.session.HTTPAddr()
+
 	cmd := func() tea.Msg {
-		err := m.proxyServer.Start(context.Background())
+		err := m.session.Wait()
 		if err != nil {
 			return proxyErrorMsg{err: err}
 		}
@@ -229,17 +245,36 @@ func (m Model) startProxy() (tea.Model, tea.Cmd) {
 func (m Model) shutdown() (tea.Model, tea.Cmd) {
 	m.phase = PhaseStopping
 
-	// Stop proxy
-	if m.proxyServer != nil {
-		m.proxyServer.Stop()
-	}
-
-	// Restore Windows proxy settings
-	if m.winProxyAuto && m.proxyBackup != nil {
-		sysproxy.Restore(m.proxyBackup)
+	if err := m.Cleanup(); err != nil {
+		m.err = errors.Join(m.err, err)
 	}
 
 	return m, tea.Quit
+}
+
+// Cleanup stops the proxy and restores system settings once. Bubble Tea copies
+// Model values, so lifecycleState is shared by pointer between all copies.
+func (m Model) Cleanup() error {
+	if m.lifecycle == nil {
+		return nil
+	}
+
+	m.lifecycle.mu.Lock()
+	defer m.lifecycle.mu.Unlock()
+
+	if m.lifecycle.cleaned {
+		return nil
+	}
+
+	if m.lifecycle.session != nil {
+		if err := m.lifecycle.session.Stop(); err != nil {
+			return err
+		}
+	}
+
+	m.lifecycle.cleaned = true
+	m.lifecycle.session = nil
+	return nil
 }
 
 // getSelectedInterfaces returns the selected interfaces.

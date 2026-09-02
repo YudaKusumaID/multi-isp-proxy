@@ -3,13 +3,13 @@
 package sysproxy
 
 import (
+	"fmt"
 	"syscall"
-	"unsafe"
 )
 
 var (
-	wininet                    = syscall.NewLazyDLL("wininet.dll")
-	procInternetSetOptionW     = wininet.NewProc("InternetSetOptionW")
+	wininet                = syscall.NewLazyDLL("wininet.dll")
+	procInternetSetOptionW = wininet.NewProc("InternetSetOptionW")
 )
 
 const (
@@ -19,8 +19,15 @@ const (
 
 // notifyProxyChange notifies the system that proxy settings have changed
 // by calling InternetSetOption with INTERNET_OPTION_SETTINGS_CHANGED and INTERNET_OPTION_REFRESH.
-func notifyProxyChange() {
-	procInternetSetOptionW.Call(0, internetOptionSettingsChanged, 0, 0)
-	procInternetSetOptionW.Call(0, internetOptionRefresh, 0, 0)
-	_ = unsafe.Sizeof(0) // prevent unused import
+func notifyProxyChange() error {
+	for _, option := range []uintptr{internetOptionSettingsChanged, internetOptionRefresh} {
+		result, _, callErr := procInternetSetOptionW.Call(0, option, 0, 0)
+		if result == 0 {
+			if callErr != syscall.Errno(0) {
+				return callErr
+			}
+			return fmt.Errorf("InternetSetOptionW(%d) returned false", option)
+		}
+	}
+	return nil
 }

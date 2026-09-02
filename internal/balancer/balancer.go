@@ -1,7 +1,7 @@
 package balancer
 
 import (
-	"github.com/ayanacorp/venn-combine-connection/internal/netif"
+	"github.com/YudaKusumaID/multi-isp-proxy/internal/netif"
 )
 
 // Mode represents the load balancing strategy.
@@ -30,11 +30,9 @@ type Strategy interface {
 	// Returns nil if no interface is available.
 	Next() *netif.NetInterface
 
-	// SetInterfaces updates the list of available interfaces.
-	SetInterfaces(interfaces []*netif.NetInterface)
-
-	// Mode returns the balancing mode.
-	Mode() Mode
+	// Candidates returns interfaces in strategy order for one logical dial.
+	// Callers may retry later candidates without advancing the strategy again.
+	Candidates() []*netif.NetInterface
 }
 
 // New creates a new Strategy based on the given mode.

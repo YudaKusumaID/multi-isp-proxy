@@ -3,7 +3,6 @@
 package netif
 
 import (
-	"fmt"
 	"os/exec"
 	"strings"
 )
@@ -52,12 +51,4 @@ func populateDetails(interfaces []*NetInterface) {
 			ni.Gateway = info.gateway
 		}
 	}
-}
-
-// GetFriendlyName returns a friendly display name for the interface.
-func GetFriendlyName(ni *NetInterface) string {
-	if ni.FriendlyName != "" {
-		return fmt.Sprintf("%s (%s)", ni.FriendlyName, ni.IP.String())
-	}
-	return fmt.Sprintf("%s (%s)", ni.Name, ni.IP.String())
 }

@@ -1,14 +1,16 @@
 package tui
 
 import (
+	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/ayanacorp/venn-combine-connection/internal/balancer"
-	"github.com/ayanacorp/venn-combine-connection/internal/netif"
-	"github.com/ayanacorp/venn-combine-connection/internal/proxy"
-	"github.com/ayanacorp/venn-combine-connection/internal/sysproxy"
+	"github.com/YudaKusumaID/multi-isp-proxy/internal/app"
+	"github.com/YudaKusumaID/multi-isp-proxy/internal/balancer"
+	"github.com/YudaKusumaID/multi-isp-proxy/internal/netif"
+	"github.com/YudaKusumaID/multi-isp-proxy/internal/proxy"
+	"github.com/YudaKusumaID/multi-isp-proxy/internal/sysproxy"
 )
 
 // Phase represents the current phase of the TUI.
@@ -34,35 +36,52 @@ type Model struct {
 	mode         balancer.Mode
 	winProxyAuto bool
 	proxyAddr    string
+	proxyConfig  proxy.Config
+	sysProxy     *sysproxy.Manager
 
 	// Running phase
-	bal         balancer.Strategy
-	proxyServer *proxy.Server
-	proxyBackup *sysproxy.ProxySettings
-
-	// Stats
-	statsTimer time.Time
+	session *app.Session
 
 	// Errors and messages
-	err     error
-	message string
+	err            error
+	message        string
+	cleanupPending bool
 
-	// Dimensions
-	width  int
-	height int
+	// Shared by all value copies of Model created by Bubble Tea.
+	lifecycle *lifecycleState
+}
+
+type lifecycleState struct {
+	mu      sync.Mutex
+	cleaned bool
+	session *app.Session
+}
+
+// Config contains runtime dependencies and proxy security settings.
+type Config struct {
+	Proxy       proxy.Config
+	SystemProxy *sysproxy.Manager
 }
 
 // NewModel creates the initial model with discovered interfaces.
 func NewModel(proxyAddr string) Model {
+	return NewModelWithConfig(Config{Proxy: proxy.Config{HTTPAddr: proxyAddr}})
+}
+
+// NewModelWithConfig creates a model with explicit runtime configuration.
+func NewModelWithConfig(config Config) Model {
 	ifaces, err := netif.Discover()
 
 	m := Model{
-		phase:     PhaseSelectInterfaces,
-		allIfaces: ifaces,
-		selected:  make(map[int]bool),
-		proxyAddr: proxyAddr,
-		mode:      balancer.ModeRoundRobin,
-		err:       err,
+		phase:       PhaseSelectInterfaces,
+		allIfaces:   ifaces,
+		selected:    make(map[int]bool),
+		proxyAddr:   config.Proxy.HTTPAddr,
+		proxyConfig: config.Proxy,
+		sysProxy:    config.SystemProxy,
+		mode:        balancer.ModeRoundRobin,
+		err:         err,
+		lifecycle:   &lifecycleState{},
 	}
 
 	return m
@@ -82,9 +101,6 @@ func doTick() tea.Cmd {
 		return tickMsg(t)
 	})
 }
-
-// proxyStartedMsg indicates the proxy has started.
-type proxyStartedMsg struct{}
 
 // proxyErrorMsg indicates a proxy error.
 type proxyErrorMsg struct {
